@@ -3,6 +3,8 @@
 import socket
 import sys
 import json
+import time
+
 
 sys.path.insert(0, '/var/scripts/aircontroller')
 import acinterface as ac
@@ -18,7 +20,7 @@ server_address = ('192.168.1.6', 10000)
 print >>sys.stderr, 'starting up on %s port %s' % server_address
 sock.bind(server_address)
 
-
+lastData = None
 
 def sleep_ac(mins):
 
@@ -56,9 +58,12 @@ def getsettings():
 		'Fan': aircon.getFan(),
 		'Temp': aircon.getTemp(),
 		'CurrentTemp': aircon.getCurrentTemp()
+		'TimeStamp': time.time() 
 	}
 	
 	aircon = None
+	
+	lastData = json.dumps(d)
 	
 	return json.dumps(d)
 	
