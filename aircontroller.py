@@ -102,6 +102,8 @@ def setsetting(cmd):
 	
 	aircon = None
 	
+	getsettings()
+	
 	return True
 
 
@@ -176,7 +178,8 @@ if __name__ == "__main__":
 						print >>sys.stderr, 'sent %s bytes back to %s' % (sent, address)
 					
 					elif command['Operation'] == "SET":
-						setsetting(command)
+						t = threading.Thread(target=setsetting, args=(command,))
+						t.start()
 					else:
 						print "Unexpected Data:"
 						print data
