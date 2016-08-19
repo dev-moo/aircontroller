@@ -157,7 +157,7 @@ class AC_Unit(object):
 		self.port = config.get('ac_settings', 'ac_port')
 		self.duid = config.get('ac_settings', 'duid')
 		self.token = config.get('ac_settings', 'user_token')
-		self.timeout =  config.get('ac_settings', 'connection_timeout')
+		self.timeout = int(config.get('ac_settings', 'connection_timeout'))
 		self.xmlheader = """<?xml version="1.0" encoding="utf-8" ?>"""
 		self.con = self.__getACConnection()
 		
