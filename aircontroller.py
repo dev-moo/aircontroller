@@ -5,7 +5,9 @@ import sys
 import json
 import time
 import threading
-
+import Queue
+import os
+from time import sleep
 
 sys.path.insert(0, '/var/scripts/aircontroller')
 import acinterface as ac
@@ -25,6 +27,47 @@ server_address = ('192.168.1.6', 10000)
 print >>sys.stderr, 'starting up on %s port %s' % server_address
 sock.bind(server_address)
 
+ac_address = '192.168.1.15'
+
+
+
+class AC_Settings(object):
+
+	def __init__(self):
+		self.power = ''
+		self.mode = ''
+		self.fan = ''
+		self.temp = ''
+		self.currenttemp = ''
+		self.timestamp = time.time()
+		self.realtime = False
+		self.online = False
+
+
+def online(hostname):
+	response = os.system("ping -c 1 " + hostname)
+	
+	if response == 0:
+		return False
+	
+	return True
+	
+	
+def convert_to_json(settings):
+
+	data =  {
+			'Power': settings.power,
+			'Mode': settings.mode,
+			'Fan': settings.fan,
+			'Temp': settings.temp,
+			'CurrentTemp': settings.currenttemp,
+			'TimeStamp': settings.timestamp,
+			'RealTime': str(setting.realtime),
+			'Online': settings.online
+		}	
+
+	return json.dumps(data)
+		
 
 def sleep_ac(mins):
 
@@ -49,63 +92,164 @@ def get_schedule():
 	return json.dumps(d)
 	
 	
-def getsettings():
-
-	global statusData
+def getsettings(settings):
+	
+	if datetime.datetime.now() - settings.timestamp < 10:
+		setting.realtime = False
+		return settings
 	
 	aircon = ac.AC_Unit()
 
 	if aircon is None:
-		return False
+		
+		setting.realtime = False
+		settings.online = online(ac_address)
+		return settings
 	
-	d = {
-		'Power': aircon.getPower(),
-		'Mode': aircon.getMode(),
-		'Fan': aircon.getFan(),
-		'Temp': aircon.getTemp(),
-		'CurrentTemp': aircon.getCurrentTemp()
-		'TimeStamp': time.time() 
-	}
+	
+	settings.power = aircon.getPower(
+	settings.mode = aircon.getMode()
+	settings.fan = aircon.getFan()
+	settings.temp = aircon.getTemp()
+	settings.currenttemp = aircon.getCurrentTemp()
+	settings.timestamp = time.time()
+	setting.realtime = True ########
+	settings.online = True
 	
 	aircon = None
 	
-	statusData = json.dumps(d)
+	return settings
 	
-	return json.dumps(d)
 	
 
-def setsetting(cmd):
 
-	aircon = ac.AC_Unit()
+class Operate_AC(object):
+
+
+	def __send_command(self, threading_event):
+	
+		i=1
+		
+		while not threading_event.isSet():
+		
+			if not self.cmd_queue.empty():
+			
+				cmd = self.cmd_queue.get()
+				
+				aircon = ac.AC_Unit()
+				
+				if aircon is not None:
+					
+					i=1
+					
+					op_type = cmd['Type']
+					op_val = cmd['Value']
+					
+					if op_type == 'Power':
+						
+						aircon.setPower(op_val)
+						
+						sleep(5)
+						
+						if aircon.getPower() != op_val:
+							self.cmd_queue.put(cmd)
+							sleep(10)
+							
+						
+					elif op_type == 'Mode':
+					
+						aircon.setMode(op_val)
+						
+						sleep(5)
+						
+						if aircon.getMode() != op_val:
+							self.cmd_queue.put(cmd)
+							sleep(10)
+						
+					elif op_type == 'Fan':
+					
+						aircon.setFan(op_val)
+						
+						sleep(5)
+						
+						if aircon.getFan() != op_val:
+							self.cmd_queue.put(cmd)
+							sleep(10)
+						
+					elif op_type == 'Temp':
+					
+						aircon.setTemp(op_val)
+						
+						sleep(5)
+						
+						if aircon.getTemp != op_val:
+							self.cmd_queue.put(cmd)
+							sleep(10)
+						
+					
+				else:
+					sleep(i*i)
+					
+				
+				aircon = None
+			
+			else:
+				sleep(1)
+		
+		return False
+		
+	
+	def __init__(self):	
+		self.cmd_queue = Queue.Queue()
+		self.t_event = threading.Event()
+		self.op_thread = threading.Thread(name='op_thread', target=self.__send_command, args=(self.t_event,))
+		self.op_thread.start()
+	
+	
+	def operate(self, command):
+		print 'Adding new item to queue: ' + command
+		self.cmd_queue.put(command)
+
+	def kill(self):
+		self.t_event.set()
+		
+	def __del__(self):
+		pass
+		
+		
+
+def setsetting(cmd, settings):
+
 	
 	print "Op: " + cmd['Operation']
 	print "Type: " + cmd['Type']
 	print "Value: " + cmd['Value']
 	
-	op_type = cmd['Type']
+	if 'RealTime' in cmd:
+		pass
+		#use forceful function
 	
-	if op_type == 'Power':
-		aircon.setPower(cmd['Value'])
-		
-	elif op_type == 'Mode':
-		aircon.setMode(cmd['Value'])
-		
-	elif op_type == 'Fan':
-		aircon.setFan(cmd['Value'])
-		
-	elif op_type == 'Sleep':
+	if cmd['Type'] == 'Sleep':
 		print "Setting sleep timer to: " + cmd['Value']
 		sleep_ac(cmd['Value'])
+	
+	else:
 		
-	elif op_type == 'Temp':
-		aircon.setTemp(cmd['Value'])
+		operator.operate(cmd)
+		
+		if cmd['Type'] == 'Power':
+			settings.power = cmd['Value']
+			
+		elif cmd['Type'] == 'Mode':
+			settings.mode = cmd['Value']
+			
+		elif cmd['Type'] == 'Fan':
+			settings.fan = cmd['Value']
+			
+		elif cmd['Type'] == 'Temp':
+			settings.temp = cmd['Value']
 	
-	aircon = None
-	
-	getsettings()
-	
-	return True
-
+	return settings
 
 
 
@@ -126,11 +270,15 @@ def updatesettings():
 	repeat_timer.start()
 
 
-updatesettings()
+#updatesettings()
 
 
 
 if __name__ == "__main__":
+
+
+	AC = AC_Settings()
+	operator = Operate_AC()
 
 	try:
 		
@@ -151,14 +299,12 @@ if __name__ == "__main__":
 					if command['Operation'] == "GET":
 					
 						if command['Type'] == "Settings":
-							#data = getsettings()
-							data = statusData
-							if data is not False:
-								sent = sock.sendto(data, address)
-							else:
-								sent = sock.sendto("failed", address)
-								
-							getsettings()
+							
+							AC = getsettings(AC)
+							
+							data = convert_to_json(AC)
+							
+							sent = sock.sendto(data, address)
 						
 						elif command['Type'] == "Schedule":
 							
@@ -190,5 +336,5 @@ if __name__ == "__main__":
 					print ""
 					
 	finally:
-		repeat_timer.cancel()
+		operator.kill()
 			
