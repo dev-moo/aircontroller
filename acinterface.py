@@ -15,7 +15,7 @@ class AC_Unit(object):
 		# Prefer TLS
 		context = OpenSSL.SSL.Context(OpenSSL.SSL.TLSv1_METHOD)
 		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		s.settimeout(10)
+		s.settimeout(self.timeout)
 		connection = OpenSSL.SSL.Connection(context,s)
 		connection.connect((self.addr, int(self.port)))
 
@@ -157,6 +157,7 @@ class AC_Unit(object):
 		self.port = config.get('ac_settings', 'ac_port')
 		self.duid = config.get('ac_settings', 'duid')
 		self.token = config.get('ac_settings', 'user_token')
+		self.timeout =  config.get('ac_settings', 'connection_timeout')
 		self.xmlheader = """<?xml version="1.0" encoding="utf-8" ?>"""
 		self.con = self.__getACConnection()
 		
@@ -262,6 +263,14 @@ class AC_Unit(object):
 		temp = int(self.parseResponse(self.__receive(), 'AC_FUN_TEMPNOW'))
 		celcius = round((temp - 32) * 5.0/9.0, 1)
 		return str(celcius)
+		
+	def isOnline():
+		response = os.system("ping -c 1 " + self.addr)
+	
+		if response == 0:
+			return False
+	
+		return True
 
 
         
