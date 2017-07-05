@@ -7,6 +7,7 @@ import OpenSSL
 import select
 import struct
 import xml.etree.ElementTree as ET
+import time
 from time import sleep
 import threading
 
@@ -25,13 +26,25 @@ MAX_TRIES = 50
 XML_HEADER = """<?xml version="1.0" encoding="utf-8" ?>"""
 SHUTDOWN_CMD = 'DIE'
 STATUS_POLL_FREQ = 60 #seconds
+RESPONSE_WAIT_TIME = 5 #seconds
 
+#A/C Properties
 AC_POWER = 'AC_FUN_POWER'
 AC_MODE = 'AC_FUN_OPMODE'
 AC_FAN = 'AC_FUN_WINDLEVEL'
 AC_TEMP = 'AC_FUN_TEMPSET'
 AC_CURRENT_TEMP = 'AC_FUN_TEMPNOW'
 AC_AUTH_TOKEN = 'AuthToken'
+
+AC_RESPONSE_TYPE = 'Type'
+AC_RESPONSE_ID = 'ID'
+AC_RESPONSE_VALUE = 'Value'
+AC_RESPONSE_STATUS = 'Status'
+
+AC_RESPONSE_TYPE_DSTATE = 'DeviceState'
+#AC_RESPONSE_TYPE_AUTH = 'AuthToken'
+AC_RESPONSE_TYPE_STATUS = 'Status'
+
 
 VALID_OPERATIONS = {AC_POWER: ('On', 'Off'),
                     AC_MODE: ('Auto', 'Cool','Dry', 'Wind', 'Heat'),
@@ -42,6 +55,16 @@ VALID_OPERATIONS = {AC_POWER: ('On', 'Off'),
 
 STATUS_CONTAINER = dict.fromkeys(VALID_OPERATIONS, '')
 
+LAST_UPDATE = 'LAST_UPDATE'
+
+
+AC_CONNECTION_STATUS = 'AC_CONNECTION_STATUS'
+AC_CONN_STATUS_ONLINE = 'ONLINE'
+AC_CONN_STATUS_CACHED = 'CACHED'
+AC_CONN_STATUS_OFFLINE = 'OFFLINE'
+
+STATUS_CONTAINER[LAST_UPDATE] = float(0)
+STATUS_CONTAINER[AC_CONNECTION_STATUS] = AC_CONN_STATUS_ONLINE
 
 POWER = 'POWER'
 MODE = 'MODE'
@@ -105,9 +128,17 @@ class ACCommunications(object):
         # Prefer TLS
         context = OpenSSL.SSL.Context(OpenSSL.SSL.TLSv1_METHOD)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)
+        #sock.settimeout(5)
         connection = OpenSSL.SSL.Connection(context, sock)
-        connection.connect(self.server_address)
+        
+        try:
+            connection.connect(self.server_address)
+        except Exception as e:
+            self.logger2.exception('Unable to connect to A/C: %s %s', e.message, e.args)
+            self.ssl_con = None
+            del sock
+            del connection
+            return False
 
         # Put the socket in blocking mode
         connection.setblocking(1)
@@ -122,10 +153,12 @@ class ACCommunications(object):
         try:
             connection.do_handshake()
         #except OpenSSL.SSL.WantReadError:
-        except:
+        except Exception as e:
             self.logger2.exception('Handshake failed %', connection.state_string())
             connection.close()
             self.ssl_con = None
+            del sock
+            del connection
             return False
 
         self.logger2.debug('State %s', connection.state_string())
@@ -140,12 +173,10 @@ class ACCommunications(object):
 
         """Test SSL connection is up"""
 
-        #return True
-
         try:
             self.ssl_con.do_handshake()
         #except OpenSSL.SSL.WantReadError:
-        except:
+        except Exception as e:
             self.logger2.info('Testing of SSL connection failed')
             return False
 
@@ -163,13 +194,15 @@ class ACCommunications(object):
         for num in xrange(MAX_TRIES):
             self.__get_ssl_connection()
             if self.ssl_con:
+                self.logger2.info('A/C connection reestablished')
                 return True
-            self.logger2.debug('Unable to establish SSL connection, retrying in %d seconds', num * num)
-            sleep(num * num)
+            self.logger2.info('Unable to establish SSL connection, retrying in %d seconds', num * num + num)
+            sleep(num * num + num)
 
         self.logger2.critical('Unable to establish SSL connection within allowed number of attempts')
-        return False
-
+        #Shutdown
+        self.__del__()
+        
 
     def __monitor_socket(self):
 
@@ -198,34 +231,42 @@ class ACCommunications(object):
                             self.rx_queue.put(data)
                         else:
                             self.logger2.warning('Error receiving data?')
+                            self.ssl_con = None
 
-                    if s is self.tx_queue:
+                    elif s is self.tx_queue:
                         self.logger2.debug('Getting data from tx_queue')
 
                         #confirm connection before trying to send anything
                         self.__maintain_ssl_connection()
 
+                        #check SSL connection is in select
+                        if not self.ssl_con in inputs:
+                            inputs.append(self.ssl_con)
+
                         data = self.tx_queue.get()
 
                         if data == SHUTDOWN_CMD:
-                            #inputs = []
-                            #self.ssl_con.close()
-                            #self.rx_queue.put(SHUTDOWN_CMD)
-                            self.logger2.info('Shutting down connection monitoring')
+                            self.logger2.info('Shutdown command received, ending connection monitoring')
                             self.__del__()
                             return None
 
+                        #Transmit to A/C
                         self.__send_data(data)
 
+                    else:
+                        self.logger2.warning('readable input in select is not monitored, removing: %s', str(s))
+                        inputs.remove(s)
 
                 for s in exceptional:
                     self.logger2.exception('Select returned an exceptional event')
 
-            except:
-                self.logger2.exception('Exception at select.select')
+            except Exception as e:
+                self.logger2.exception('Exception at select.select: %s %s', e.message, e.args)
                 break
 
         self.logger2.critical('Connection monitoring ended unexpectedly')
+        #Shutdown
+        self.__del__()
 
 
     def __init__(self, s_address, token, send_q, receive_q, log):
@@ -248,10 +289,11 @@ class ACCommunications(object):
     def __del__(self):
         self.logger2.info('Deconstructing ACCommunications')
         self.ssl_con.close()
-        self.tx_queue.put(self.rx_queue.put(SHUTDOWN_CMD))
+        self.tx_queue.put(SHUTDOWN_CMD)
+        self.rx_queue.put(SHUTDOWN_CMD)
 
-
-
+    def shutdown(self):
+        self.__del__()
 
 
 
@@ -283,8 +325,10 @@ class AirConInterface(object):
 
             root = ET.fromstring(xml_string)
 
-            if root.attrib['Type'] == AC_AUTH_TOKEN:
-                return [{'ID': AC_AUTH_TOKEN, 'Value': root.attrib['Status']}]
+            if root.attrib[AC_RESPONSE_TYPE] == AC_AUTH_TOKEN:
+                return [{AC_RESPONSE_TYPE: root.attrib[AC_RESPONSE_TYPE],
+                         AC_RESPONSE_ID: AC_AUTH_TOKEN,
+                         AC_RESPONSE_VALUE: root.attrib[AC_RESPONSE_STATUS]}]
 
             else:
 
@@ -294,13 +338,15 @@ class AirConInterface(object):
 
                     for n in node.keys():
 
-                        if n == 'ID':
+                        if n == AC_RESPONSE_ID:
                             func = node.get(n)
-                        elif n == 'Value':
+                        elif n == AC_RESPONSE_VALUE:
                             value = node.get(n)
 
                     if func in VALID_OPERATIONS.keys():
-                        all_attributes.append({'ID': func, 'Value': value})
+                        all_attributes.append({AC_RESPONSE_TYPE: root.attrib[AC_RESPONSE_TYPE],
+                                               AC_RESPONSE_ID: func,
+                                               AC_RESPONSE_VALUE: value})
 
                 return all_attributes
 
@@ -322,7 +368,7 @@ class AirConInterface(object):
             self.status[function] = value
             return True
         else:
-            self.logger1.exception('Error updating current status dict, no key:', attribute)
+            #self.logger1.exception('Error updating current status dict, no key:', function)
             return False
 
 
@@ -349,12 +395,14 @@ class AirConInterface(object):
 
                     parsed = self.__parse_xml_input(data)
 
-                    if type(parsed) is list:
+                    if isinstance(parsed, list):
                         for attrib in parsed:
-                            self.__update_status_contatiner(attrib['ID'], attrib['Value'])
+                            self.__update_status_contatiner(attrib[AC_RESPONSE_ID],
+                                                            attrib[AC_RESPONSE_VALUE])
 
                         #received full status update
-                        if len(parsed) > 1:
+                        if len(parsed) > 0 and parsed[0][AC_RESPONSE_TYPE] == AC_RESPONSE_TYPE_DSTATE:
+                            self.__update_status_contatiner(LAST_UPDATE, time.time())
                             r_event.set()
 
             except TypeError:
@@ -363,6 +411,7 @@ class AirConInterface(object):
                 self.logger1.exception('Exception:')
 
         self.logger1.info('Monitoring of receive queue ended unexpectedly')
+        self.__del__()
 
 
 
@@ -376,10 +425,9 @@ class AirConInterface(object):
             self.logger1.info('Stopping poll_status thread')
             return None
 
-        polling_thread = None
-        polling_thread = threading.Timer(STATUS_POLL_FREQ, self.__poll_status)
-        polling_thread.setName('status_polling_thread')
-        polling_thread.start()
+        self.polling_thread = threading.Timer(STATUS_POLL_FREQ, self.__poll_status)
+        self.polling_thread.setName('status_polling_thread')
+        self.polling_thread.start()
 
 
 
@@ -387,7 +435,7 @@ class AirConInterface(object):
 
         config = get_config.get_config(CONFIG_FILE_NAME)
 
-        log_filename = config.get('interface', 'logfile')
+        log_filename = THIS_DIR + '/' + config.get('interface', 'logfile')
         ac_address = (config.get('interface', 'ac_addr'),
                       int(config.get('interface', 'ac_port')))
 
@@ -425,6 +473,7 @@ class AirConInterface(object):
         self.monitor_input.start()
 
         #Start thread to poll A/C status
+        self.polling_thread = None
         self.__poll_status()
 
 
@@ -433,9 +482,10 @@ class AirConInterface(object):
         self.logger1.info('Shutting down all everything!')
         self.tx_queue.put(SHUTDOWN_CMD)
         self.rx_queue.put(SHUTDOWN_CMD)
+        self.polling_thread.cancel()
         sleep(2)
-        self.tx_queue = None
-        self.rx_queue = None
+        #del self.tx_queue
+        #del self.rx_queue
         self.logger1.info('Shutdown of all everything complete, goodbye :)')
 
 
@@ -446,13 +496,22 @@ class AirConInterface(object):
         self.__del__()
 
 
-    def __translate(self, status_dict):
-
-        for key in status_dict.keys():
+    #Translate self.status dictionary key names
+    def __translate(self):
+        status_dict = self.status.copy()
+        
+        for key in TRANSLATE.keys():
             status_dict[TRANSLATE[key]] = status_dict.pop(key)
 
+        #Provide feedback on age of status info
+        if time.time() - status_dict[LAST_UPDATE] < 5:
+            status_dict[AC_CONNECTION_STATUS] = AC_CONN_STATUS_ONLINE
+        elif time.time() - status_dict[LAST_UPDATE] <= 60:
+            status_dict[AC_CONNECTION_STATUS] = AC_CONN_STATUS_CACHED
+        else:
+            status_dict[AC_CONNECTION_STATUS] = AC_CONN_STATUS_OFFLINE
+            
         return status_dict
-
 
     def get_all_settings(self):
         self.logger1.debug('Requesting A/C current status')
@@ -460,14 +519,14 @@ class AirConInterface(object):
         self.tx_queue.put(self.__create_status_request())
 
         #Wait for response
-        self.receive_event.wait(5)
+        self.receive_event.wait(RESPONSE_WAIT_TIME)
 
         if self.receive_event.isSet():
             self.logger1.debug('Received data from A/C')
         else:
             self.logger1.info('No data received, returning cached data')
 
-        return self.__translate(self.status)
+        return self.__translate()
 
     def get_power(self):
         self.get_all_settings()
@@ -492,29 +551,35 @@ class AirConInterface(object):
 
     def __set(self, function, val, possible_vals):
         """sanity check request and add to transmit queue"""
-        val = val.capitalize()
+        if isinstance(val, str): val = val.capitalize()
+        
         if val in possible_vals:
-            if type(val) is int: val = str(val)
+            if not isinstance(val, str): val = str(val)
             self.__update_status_contatiner(function, val)
             self.tx_queue.put(self.__create_control_request(function, val))
             return True
+        
         return False
 
     def set_power(self, val):
+        self.logger1.debug('Setting power to: %s', val)
         self.__set(AC_POWER, val, VALID_OPERATIONS[AC_POWER])
 
     def set_mode(self, val):
         if val == 'FAN': val = 'Wind'
+        self.logger1.debug('Setting mode to: %s', val)
         self.__set(AC_MODE, val, VALID_OPERATIONS[AC_MODE])
 
     def set_fan(self, val):
+        self.logger1.debug('Setting fan to: %s', val)
         self.__set(AC_FAN, val, VALID_OPERATIONS[AC_FAN])
 
     def set_temp(self, val):
+        self.logger1.debug('Setting temp to: %s', val)
         self.__set(AC_TEMP, int(val), VALID_OPERATIONS[AC_TEMP])
 
     def set_power_on(self):
-        return self.set_power('On')
+        self.set_power('On')
 
     def set_power_off(self):
-        return self.set_power('Off')
+        self.set_power('Off')

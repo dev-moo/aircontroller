@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 """Air Con Server"""
 
 import os
@@ -37,21 +39,18 @@ class JSONtoACInterface(object):
         self.__del__()
 
 
-    def __get_settings(self):
+    def __get_settings(self, cmd):
 
         self.logger.debug('Getting A/C status')
 
-        #settings = {'POWER': self.aircon.get_power(),
-        #        'MODE': self.aircon.get_mode(),
-        #        'FAN': self.aircon.get_fan(),
-        #        'TEMP': self.aircon.get_temp(),
-        #        'CURRENT_TEMP': self.aircon.get_current_temp(),
-        #        'TIMER': 'True'
-        #       }
+        all_settings = self.aircon.get_all_settings()
 
-        #print settings
+        self.logger.debug('Received settings')
 
-        return self.aircon.get_all_settings()
+        if 'ID' in cmd:
+            all_settings['ID'] = cmd['ID']
+
+        return all_settings
 
 
     def __set_settings(self, settings):
@@ -59,6 +58,10 @@ class JSONtoACInterface(object):
         """Control A/C"""
 
         try:
+
+            if 'TIMER' in settings:
+                pass
+                #start timer thread with 'TIMER' value as sleep time and settings as arg
 
             if not 'TYPE' in settings:
 
@@ -72,15 +75,13 @@ class JSONtoACInterface(object):
                     self.aircon.set_fan(settings['FAN'])
                 if 'TEMP' in settings:
                     self.aircon.set_temp(settings['TEMP'])
-                #if 'SLEEP' in settings:
-                #    self.aircon.sleep_timer(settings['SLEEP'])
 
             else:
 
                 #Backwards compatibility - single command per JSON string
 
-                op_type = settings['TYPE']
-                val = settings['VALUE']
+                op_type = str(settings['TYPE'])
+                val = str(settings['VALUE'])
 
                 if op_type == 'POWER':
                     self.aircon.set_power(val)
@@ -90,30 +91,36 @@ class JSONtoACInterface(object):
                     self.aircon.set_fan(val)
                 elif op_type == 'TEMP':
                     self.aircon.set_temp(val)
-                elif op_type == 'SLEEP':
-                    pass
-                    #self.aircon.sleep_timer(val)
 
         except KeyError:
             self.logger.exception('Key error when parsing %s', settings)
+            if 'ID' in settings:
+                return {'RESPONSE': 'FAIL', 'ID': settings['ID']}
+            return {'RESPONSE': 'FAIL'}
+
+        if 'ID' in settings:
+            return {'RESPONSE': 'OK', 'ID': settings['ID']}
+        return {'RESPONSE': 'OK'}
 
 
 
     def parse(self, command):
         """Handle Set and Get operations"""
 
-        self.logger.debug('Received', command)
+        self.logger.debug('Received: %s', command)
 
         try:
             if 'OPERATION' in command:
 
                 if command['OPERATION'] == "GET":
-                    return json.dumps(self.__get_settings())
+                    if command['TYPE'] == 'SETTINGS':
+                        return json.dumps(self.__get_settings(command))
 
                 elif command['OPERATION'] == "SET":
-                    self.__set_settings(command)
+                    #self.__set_settings(command)
                     #return json.dumps({'RESPONSE': 'OK'})
-                    return json.dumps(self.__get_settings())
+                    #return json.dumps(self.__get_settings())
+                    return json.dumps(self.__set_settings(command))
 
             else:
                 self.logger.info('Command contains no Operation')
@@ -156,7 +163,7 @@ if __name__ == "__main__":
 
     CONFIG = get_config.get_config(CONFIG_FILE_NAME)
 
-    LOG_FILENAME = CONFIG.get('server', 'logfile')
+    LOG_FILENAME = THIS_DIR + '/' + CONFIG.get('server', 'logfile')
     HOST = CONFIG.get('server', 'server_ip')
     PORT = int(CONFIG.get('server', 'server_port'))
 
