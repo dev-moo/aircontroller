@@ -1,11 +1,12 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 """Air Con Server"""
 
 import os
-import SocketServer
+import socketserver
 import json
 import sys
+#import socket
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
@@ -14,6 +15,8 @@ import aircon_interface as AIRCON
 import log_handler
 import get_config
 
+#HOSTNAME = socket.gethostname()    
+#IPADDR = socket.gethostbyname(HOSTNAME)
 
 """
 Sleep timer
@@ -133,25 +136,26 @@ class JSONtoACInterface(object):
 
 
 
-class UDPHandler(SocketServer.BaseRequestHandler):
+class UDPHandler(socketserver.BaseRequestHandler):
     """
     UDPHandler to handle UDP requests
     """
 
     def __init__(self, request, client_address, srvr):
         self.logger = LOGGER1
-        SocketServer.BaseRequestHandler.__init__(self, request, client_address, srvr)
+        socketserver.BaseRequestHandler.__init__(self, request, client_address, srvr)
         return
 
     def handle(self):
         data = self.request[0].strip().upper()
         socket = self.request[1]
+        data = data.decode()
 
         self.logger.debug("From %s: %s", self.client_address[0], data)
 
         try:
             response = AIRCON_HANDLER.parse(json.loads(data))
-            socket.sendto(response, self.client_address)
+            socket.sendto(response.encode(), self.client_address)
         except ValueError:
             self.logger.exception('Exception decoding JSON')
 
@@ -168,13 +172,18 @@ if __name__ == "__main__":
     PORT = int(CONFIG.get('server', 'server_port'))
 
     LOGGER1 = log_handler.get_log_handler(LOG_FILENAME, 'info', 'aircontroller.UDPHandler')
+    #LOGGER1 = log_handler.get_log_handler(LOG_FILENAME, 'debug', 'aircontroller.UDPHandler')
 
     AIRCON_HANDLER = JSONtoACInterface(log_handler.get_log_handler(LOG_FILENAME,
                                                                    'info',
                                                                    'aircontroller.JSONtoAC'))
 
     LOGGER1.info('Starting UPD server at %s:%d', HOST, PORT)
-    SERVER = SocketServer.UDPServer((HOST, PORT), UDPHandler)
+    SERVER = socketserver.UDPServer((HOST, PORT), UDPHandler)
+    
+    #LOGGER1.info('Starting UPD server at %s:%d', IPADDR, PORT)
+    #SERVER = socketserver.UDPServer((IPADDR, PORT), UDPHandler)
+    
     SERVER.allow_reuse_address = True
 
     try:
