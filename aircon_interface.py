@@ -90,7 +90,39 @@ class ACCommunications(object):
         """XML string required to authenticate with A/C server"""
         return """%s<Request Type="AuthToken"><User Token="%s" /></Request>""" % (XML_HEADER, self.token)
 
+    
+    def __disconnect(self):
+    
+        """Disconnect SSL connection"""
+        
+        self.logger2.info('Disconnecting SSL session')
+        
+        if not self.ssl_con:
+            return True
+        
+        try:
+            self.__send_data('exit')
+            sleep(1)
+        except:
+            pass
+        
+        try:
+            self.ssl_con.shutdown()
+            self.ssl_con.close()
+        except:
+            pass
+            
+        self.ssl_con = None   
+         
+        if self.ssl_con:
+            self.logger2.warning('Disconnect SSL failed')
+            return False
+            
+        self.logger2.debug('Disconnected SSL session')
 
+        return True
+        
+    
     def __send_data(self, data):
 
         """Send data on SSL connection"""
@@ -98,7 +130,7 @@ class ACCommunications(object):
         self.logger2.debug('Sending some data to A/C')
 
         try:
-            data = self.ssl_con.send(data + '\r\n')
+            data = self.ssl_con.send((data + '\r\n').encode())
             return True
         except:
             self.logger2.exception('Exception sending data on socket')
@@ -113,7 +145,9 @@ class ACCommunications(object):
         self.logger2.debug('Receiving some data from A/C')
 
         try:
+            #self.logger2.debug('Number of bytes in receive buffer: %s', self.ssl_con.pending())
             data = self.ssl_con.recv(1024)
+            data = data.decode()
             return data.strip('\r''\n')
         except:
             self.logger2.exception('Exception receiving data on socket')
@@ -124,9 +158,15 @@ class ACCommunications(object):
     def __get_ssl_connection(self):
 
         """Get SSL connection to A/C unit"""
+        
+        self.ssl_con = None
+        
+        self.logger2.debug('Connecting to %s...', self.server_address)
 
         # Prefer TLS
         context = OpenSSL.SSL.Context(OpenSSL.SSL.TLSv1_METHOD)
+        context.set_cipher_list('AES256-SHA')
+        
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         #sock.settimeout(5)
         connection = OpenSSL.SSL.Connection(context, sock)
@@ -161,45 +201,41 @@ class ACCommunications(object):
             del connection
             return False
 
-        self.logger2.debug('State %s', connection.state_string())
+        #self.logger2.debug('State %s', connection.state_string())
         self.ssl_con = connection
         self.tx_queue.put(self.__create_authentication_request())
 
         return True
 
-
-
-    def __test_connection(self):
-
-        """Test SSL connection is up"""
-
-        try:
-            self.ssl_con.do_handshake()
-        #except OpenSSL.SSL.WantReadError:
-        except Exception as e:
-            self.logger2.info('Testing of SSL connection failed')
-            return False
-
-        self.logger2.debug('Testing of SSL connection passed')
-        return True
-
-
-    def __maintain_ssl_connection(self):
+       
+        
+    def __establish_ssl_connection(self):
 
         """Loop until SSL connection established, increase wait time on each loop"""
+        
+        self.logger2.info('Attempting to establish connection with A/C...')
+        
+        try:
+            if self.ssl_con: self.__disconnect()
+        except:
+            self.logger2.info('Exception during disconnect')
 
-        if self.ssl_con and self.__test_connection():
-            return True
-
-        for num in xrange(MAX_TRIES):
-            self.__get_ssl_connection()
-            if self.ssl_con:
-                self.logger2.info('A/C connection reestablished')
-                return True
+        for num in range(MAX_TRIES):
+            
+            try: 
+                if self.__get_ssl_connection():
+                    self.logger2.info('A/C connection established')
+                    return True
+            
+            except:
+                self.logger2.info('Exception while establishing SSL')
+                
+                
             self.logger2.info('Unable to establish SSL connection, retrying in %d seconds', num * num + num)
             sleep(num * num + num)
 
         self.logger2.critical('Unable to establish SSL connection within allowed number of attempts')
+        
         #Shutdown
         self.__del__()
         
@@ -212,36 +248,43 @@ class ACCommunications(object):
 
         self.logger2.debug('Starting SSL connection monitoring')
 
-        self.__maintain_ssl_connection()
+        #self.__maintain_ssl_connection()
+        self.__establish_ssl_connection()
 
         inputs = [self.ssl_con, self.tx_queue]
 
         while True:
 
             try:
-                readable, writable, exceptional = select.select(inputs, [], inputs)
+                readable, writable, exceptional = select.select(inputs, [], [])
 
                 for s in readable:
 
+                    #Check SSL connection is in select
+                    if not self.ssl_con in inputs:
+                        inputs.append(self.ssl_con)
+                    
+                    #Check number of inputs in select
+                    if len(inputs) != 2:
+                        self.logger2.warning('Number of select inputs is: %d', len(inputs))
+                    
+                    #If input from SSL Connection
                     if s is self.ssl_con:
+                    
                         data = self.__receive_data()
 
                         if data:
-                            self.logger2.debug('Putting data on rx_queue')
+                            self.logger2.debug('Putting received data on rx_queue')
                             self.rx_queue.put(data)
                         else:
-                            self.logger2.warning('Error receiving data?')
-                            self.ssl_con = None
-
+                            self.logger2.warning('Error receiving data from A/C')
+                            inputs.remove(s)
+                            self.__establish_ssl_connection()                       
+                    
+                    #If input from transmit queue
                     elif s is self.tx_queue:
+                    
                         self.logger2.debug('Getting data from tx_queue')
-
-                        #confirm connection before trying to send anything
-                        self.__maintain_ssl_connection()
-
-                        #check SSL connection is in select
-                        if not self.ssl_con in inputs:
-                            inputs.append(self.ssl_con)
 
                         data = self.tx_queue.get()
 
@@ -251,8 +294,15 @@ class ACCommunications(object):
                             return None
 
                         #Transmit to A/C
-                        self.__send_data(data)
-
+                        if self.__send_data(data):
+                            self.logger2.debug('Data sent successfully')
+                        else:
+                            inputs.remove(s)
+                            self.__establish_ssl_connection()
+                            #inputs.append(self.ssl_con)
+                            #readable, writable, exceptional = select.select(inputs, [], inputs)
+                    
+                    #If input from unexpected source
                     else:
                         self.logger2.warning('readable input in select is not monitored, removing: %s', str(s))
                         inputs.remove(s)
@@ -261,12 +311,22 @@ class ACCommunications(object):
                     self.logger2.exception('Select returned an exceptional event')
 
             except Exception as e:
-                self.logger2.exception('Exception at select.select: %s %s', e.message, e.args)
+                #self.logger2.exception('Exception at select.select: %s %s', e.message, e.args)
+                self.logger2.exception('Exception at select.select')
                 break
 
         self.logger2.critical('Connection monitoring ended unexpectedly')
         #Shutdown
         self.__del__()
+
+    
+    def reset_ssl(self):
+    
+        self.__disconnect()
+        
+        #self.reset_timer = threading.Timer(self.reset_period, self.reset_ssl) 
+        #self.reset_timer.start() 
+
 
 
     def __init__(self, s_address, token, send_q, receive_q, log):
@@ -278,19 +338,35 @@ class ACCommunications(object):
         self.tx_queue = send_q
         self.rx_queue = receive_q
         self.logger2 = log
+        
+        self.reset_period = 90
 
         self.ssl_con = None
+        self.monitor_socket = None
 
+        self.start()
+
+        #self.monitor_socket = threading.Thread(name='monitor_ssl_socket',
+        #                                      target=self.__monitor_socket)
+        #self.monitor_socket.start()
+        
+        #self.reset_timer = threading.Timer(self.reset_period, self.reset_ssl) 
+        #self.reset_timer.start() 
+        
+    def start(self):
+        
         self.monitor_socket = threading.Thread(name='monitor_ssl_socket',
                                                target=self.__monitor_socket)
         self.monitor_socket.start()
-
+        
+    def stop(self):
+        self.__del__()
 
     def __del__(self):
         self.logger2.info('Deconstructing ACCommunications')
-        self.ssl_con.close()
+        self.__disconnect()
         self.tx_queue.put(SHUTDOWN_CMD)
-        self.rx_queue.put(SHUTDOWN_CMD)
+        #self.rx_queue.put(SHUTDOWN_CMD)
 
     def shutdown(self):
         self.__del__()
@@ -314,7 +390,9 @@ class AirConInterface(object):
         root = ET.Element('Request', Type="DeviceControl")
         child = ET.SubElement(root, 'Control', CommandID="cmd00000", DUID=self.ac_duid)
         grandchild = ET.SubElement(child, 'Attr', ID=function, Value=value)
-        return XML_HEADER + ET.tostring(root)
+        #print(type(XML_HEADER))
+        #print(type(ET.tostring(root)))
+        return XML_HEADER + (ET.tostring(root)).decode()
 
 
     def __parse_xml_input(self, xml_string):
