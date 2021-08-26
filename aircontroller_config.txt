@@ -1,15 +1,14 @@
-
 [server]
 
 logfile=ac_server_log.txt
 
-server_ip=localhost
-server_port=11223
+server_ip=192.168.1.2
+server_port=10000
 
 [interface]
 
 logfile=ac_interface_log.txt
-ac_addr=10.1.1.200
+ac_addr=192.168.1.15
 ac_port=2878
-duid=112233445566
-user_token=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+duid=7825AD109303
+user_token=04167757-9775-M633-N858-373832354144
